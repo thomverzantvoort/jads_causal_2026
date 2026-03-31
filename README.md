@@ -1,4 +1,4 @@
-# ADS & Marketing — Block 2
+# Causal ML — Block 2
 
 Course notebooks for Block 2. Each week has its own folder. Notebooks are written in Quarto and run Python and R side by side.
 
@@ -27,8 +27,8 @@ Close and reopen your terminal after installing so `uv` is on your PATH.
 ### 2. Clone the repo
 
 ```bash
-git clone https://github.com/yourname/ads-marketing-block2
-cd ads-marketing-block2
+git clone [https://github.com/tomhackenberg/CIBD_2026](https://github.com/tomhackenberg/CIBD_2026)
+cd CIBD_2026
 ```
 
 ---
