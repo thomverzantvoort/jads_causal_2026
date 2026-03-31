@@ -1,7 +1,7 @@
 ---
 title: "ML for Causal Inference"
 subtitle: "Why and How?"
-author: "Tom Hackenberg"
+author: "Tom Hackenberg Week 9"
 date: "30 March 2025"
 format:
   revealjs:
