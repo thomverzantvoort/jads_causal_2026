@@ -1,0 +1,284 @@
+---
+title: "Week 11 — Before the Lecture"
+subtitle: "Two things you already know, and one question they raise"
+author: "Tom Hackenberg · Block 2"
+date: "10 April 2025"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 2
+    toc-title: "Contents"
+    code-fold: false
+    code-tools: true
+    highlight-style: github
+    fig-align: center
+    embed-resources: true
+execute:
+  eval: true
+  echo: true
+  warning: false
+  message: false
+---
+
+> **This notebook is optional and short — around 20 minutes.** There is no new method here. The goal is to make sure the question Week 11 answers is sitting clearly in your mind before you walk into the lecture. A more substantial notebook will follow after the lecture, where you will implement everything in code.
+
+---
+
+## Setup
+
+```{python}
+#| label: setup
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import networkx as nx
+
+rng = np.random.default_rng(99)
+```
+
+---
+
+## 1 · What We Already Know
+
+In Week 9 we established two failure modes — two ways of getting a causal estimate badly wrong even when you have a lot of data and a well-fitted model.
+
+**Failure mode 1: Naïve OLS**
+
+You regress sales on ad spend without accounting for product quality. Quality drives both — firms with better products advertise more *and* sell more. The regression picks up both effects and attributes them entirely to ad spend. The estimate is inflated, and nothing in the output tells you.
+
+**Failure mode 2: LASSO**
+
+You have many potential controls and reach for LASSO to handle the dimensionality. The penalty shrinks all coefficients toward zero — including the treatment coefficient you actually care about. The model predicts well. The causal estimate is wrong.
+
+These two failure modes look different on the surface. One ignores confounding entirely; the other tries to handle dimensionality but corrupts the estimate in the process. But they share a common root:
+
+::: {.callout-important}
+Neither method properly isolates the variation in ad spend that is genuinely exogenous to product quality. As long as quality's influence is still mixed into the treatment, no amount of data or model sophistication will recover the true causal effect.
+:::
+
+This is the problem Week 11 addresses — precisely and mathematically.
+
+---
+
+## 2 · The Evidence
+
+Let's reproduce the key result from Week 9 in one tight block, with one addition: we now include LASSO alongside naïve OLS and controlled OLS, so all three failure modes are visible in a single plot.
+
+### The data-generating process
+
+The setup is identical to Week 9:
+
+- $W$ = product quality (the confounder, standardised)
+- $T$ = ad spend; quality firms advertise more: $T = 2W + \varepsilon_T$
+- $Y$ = sales; quality drives sales directly *and* ad spend has a true causal effect:
+$$Y = \underbrace{1.5}_{\tau} \cdot T + 3.0 \cdot W + \varepsilon_Y$$
+- True causal effect: **τ = 1.5**
+
+```{python}
+#| label: dgp
+n = 500
+
+W = rng.normal(0, 1, n)
+T = 2.0 * W + rng.normal(0, 1, n)
+
+tau_true = 1.5
+Y = tau_true * T + 3.0 * W + rng.normal(0, 1, n)
+
+data = pd.DataFrame({"W": W, "T": T, "Y": Y})
+```
+
+### Four estimators
+
+```{python}
+#| label: four-estimators
+from sklearn.linear_model import LassoCV
+from sklearn.preprocessing import StandardScaler
+
+# 1. Naïve OLS — ignores W entirely
+T_named     = pd.Series(T, name="T")
+model_naive = sm.OLS(Y, sm.add_constant(T_named)).fit()
+tau_naive   = model_naive.params["T"]
+
+# 2. OLS with W as a control — the correct low-dimensional baseline
+model_ctrl = sm.OLS(Y, sm.add_constant(data[["T", "W"]])).fit()
+tau_ctrl   = model_ctrl.params["T"]
+
+# 3. Naïve LASSO — T only, no W included
+#    Does LASSO "discover" the confounder by itself?
+scaler1         = StandardScaler()
+lasso_naive     = LassoCV(cv=5, random_state=0).fit(
+    scaler1.fit_transform(data[["T"]]), Y
+)
+tau_lasso_naive = lasso_naive.coef_[0] / scaler1.scale_[0]
+
+# 4. High-dimensional LASSO — W included alongside 50 noise covariates
+#    Regularisation now bites meaningfully; treatment coefficient is penalised
+rng2            = np.random.default_rng(7)   # separate seed for noise
+noise           = rng2.normal(0, 1, (n, 50))
+noise_df        = pd.DataFrame(noise, columns=[f"z{i}" for i in range(50)])
+X_rich          = pd.concat([data[["T", "W"]], noise_df], axis=1)
+scaler2         = StandardScaler()
+lasso_highdim   = LassoCV(cv=5, random_state=0).fit(
+    scaler2.fit_transform(X_rich), Y
+)
+tau_lasso_hd    = lasso_highdim.coef_[0] / scaler2.scale_[0]
+
+print(f"True τ:                        {tau_true:.3f}")
+print(f"Naïve OLS (no W):              {tau_naive:.3f}  (bias: {tau_naive    - tau_true:+.3f})")
+print(f"Controlled OLS (with W):       {tau_ctrl:.3f}  (bias: {tau_ctrl     - tau_true:+.3f})")
+print(f"Naïve LASSO (no W):            {tau_lasso_naive:.3f}  (bias: {tau_lasso_naive - tau_true:+.3f})")
+print(f"High-dim LASSO (W + 50 noise): {tau_lasso_hd:.3f}  (bias: {tau_lasso_hd  - tau_true:+.3f})")
+```
+
+```{python}
+#| label: estimator-plot
+#| fig-cap: "Four estimators, same DGP. Two failure modes, one fix."
+
+fig, ax = plt.subplots(figsize=(9, 5.5), facecolor="#0f1117")
+ax.set_facecolor("#1e2d3d")
+for spine in ax.spines.values():
+    spine.set_edgecolor("#3a5068")
+ax.tick_params(colors="#a0b4c8")
+ax.xaxis.label.set_color("#a0b4c8")
+ax.title.set_color("#d0dce8")
+
+labels = [
+    "True τ",
+    "Naïve OLS\n(no W — confounding bias)",
+    "Naïve LASSO\n(no W — LASSO can't\ndiscover confounders)",
+    "High-dim LASSO\n(W + 50 noise vars —\nregularisation shrinks τ̂)",
+    "OLS + control\n(W included — correct)",
+]
+values = [tau_true, tau_naive, tau_lasso_naive, tau_lasso_hd, tau_ctrl]
+colors = ["#a0b4c8", "#e07070", "#e07070", "#e0a050", "#7ecba1"]
+
+bars = ax.barh(labels, values, color=colors, height=0.45)
+ax.axvline(tau_true, color="#a0b4c8", linestyle="--", linewidth=1.2,
+           alpha=0.7, label=f"True τ = {tau_true}")
+
+for bar, val in zip(bars, values):
+    ax.text(val + 0.03, bar.get_y() + bar.get_height() / 2,
+            f"{val:.2f}", va="center", color="#d0dce8", fontsize=10)
+
+ax.set_xlabel("Estimated causal effect of ad spend on sales")
+ax.set_title("Same data. Two failure modes. One fix.", fontsize=12)
+ax.set_xlim(0, max(values) * 1.35)
+ax.legend(facecolor="#1e2d3d", labelcolor="#d0dce8", edgecolor="#3a5068")
+
+plt.tight_layout()
+plt.show()
+```
+
+Three things are visible here. First, naïve OLS and naïve LASSO give essentially the same inflated answer — LASSO does not "discover" that quality is a confounder; it regularises whatever you hand it. Second, even when W is included, high-dimensional LASSO slightly undershoots the truth because the penalty shrinks the treatment coefficient alongside fifty noise variables. Third, controlled OLS with just W lands on the truth.
+
+The deeper point: in each failure case, the root problem is the same. Ad spend's influence is not cleanly separated from quality's influence. Either quality is omitted entirely, or regularisation blurs the boundary between them. Controlled OLS works because it does something more precise — something Week 11 will name and prove.
+
+### Why the DAG makes this visible
+
+The problem has a clean causal structure. Product quality opens a backdoor path from ad spend to sales. As long as that path is open, raw correlations between ad spend and sales are contaminated.
+
+```{python}
+#| label: dag
+#| fig-cap: "Quality confounds the ad spend → sales relationship."
+
+G = nx.DiGraph()
+G.add_edges_from([
+    ("Product\nQuality", "Ad Spend"),
+    ("Product\nQuality", "Sales"),
+    ("Ad Spend",         "Sales"),
+])
+
+pos = {
+    "Product\nQuality": (0.0,  1.0),
+    "Ad Spend":         (-0.8, 0.0),
+    "Sales":            ( 0.8, 0.0),
+}
+
+fig, ax = plt.subplots(figsize=(7, 4), facecolor="#0f1117")
+ax.set_facecolor("#0f1117")
+ax.axis("off")
+
+backdoor = [("Product\nQuality", "Ad Spend"), ("Product\nQuality", "Sales")]
+causal   = [("Ad Spend", "Sales")]
+
+nx.draw_networkx_edges(G, pos, edgelist=backdoor,
+                       edge_color="#e07070", width=2.2, arrows=True,
+                       arrowsize=22, connectionstyle="arc3,rad=0.1", ax=ax)
+nx.draw_networkx_edges(G, pos, edgelist=causal,
+                       edge_color="#7ecba1", width=2.2, arrows=True,
+                       arrowsize=22, connectionstyle="arc3,rad=0.1", ax=ax)
+nx.draw_networkx_nodes(G, pos, node_color="#1e2d3d", edgecolors="#3a5068",
+                       node_size=3500, linewidths=1.5, ax=ax)
+nx.draw_networkx_labels(G, pos, font_color="#d0dce8", font_size=10,
+                        font_family="sans-serif", ax=ax)
+
+legend_elements = [
+    plt.Line2D([0], [0], color="#e07070", linewidth=2, label="Backdoor path (confounding)"),
+    plt.Line2D([0], [0], color="#7ecba1", linewidth=2, label="Causal path (what we want)"),
+]
+ax.legend(handles=legend_elements, facecolor="#1e2d3d",
+          labelcolor="#d0dce8", edgecolor="#3a5068", loc="lower center",
+          fontsize=10)
+ax.set_title("Product quality opens a backdoor path",
+             color="#d0dce8", fontsize=12, pad=12)
+
+plt.tight_layout()
+plt.show()
+```
+
+Closing the backdoor means conditioning on quality — which is exactly what the controlled OLS does. But *why* does including quality in the regression close the backdoor? What is OLS doing, algebraically, that achieves this? The answer to that question is not obvious, and it is not "it holds quality constant" — that is a description, not an explanation.
+
+---
+
+## 3 · The Question Week 11 Answers
+
+Here is a concrete version of the question to bring to Monday's lecture.
+
+When OLS includes quality as a control, it implicitly runs a specific procedure on your data — a procedure with a precise geometric meaning. The procedure has three steps:
+
+1. Take the variation in **ad spend** that quality cannot predict. Call this $\tilde{T}$.
+2. Take the variation in **sales** that quality cannot predict. Call this $\tilde{Y}$.
+3. Regress $\tilde{Y}$ on $\tilde{T}$.
+
+The claim — which Week 11 proves — is that the coefficient from step 3 is *numerically identical* to the β̂ you get from the full regression with quality included. Not approximately equal. Exactly equal.
+
+::: {.callout-note}
+**The question to sit with before Monday:**
+
+If you stripped out everything that product quality explains — from ad spend and from sales simultaneously — and then correlated what is left, would you recover the same coefficient as the full regression?
+
+Think about what that would mean geometrically. Think about what "stripping out quality's influence" actually does to the two variables. Come to the lecture with an intuition, even a wrong one.
+:::
+
+This result — the Frisch-Waugh-Lovell theorem — is not just a curiosity about OLS. It is the engine that drives Double Machine Learning, which is what weeks 12 and 15 are built on. Understanding it precisely is what separates using DML as a black box from understanding why it works.
+
+---
+
+## 4 · What Comes Next
+
+**Monday's lecture** starts with geometry — before any formula. Variables as vectors, regression as projection, and what "controlling for quality" looks like in that space. The theorem is then just the formalisation of a picture you will have already understood.
+
+The lecture also covers when and why this breaks: what happens when confounders have non-linear effects, or when you have too many controls for OLS to handle. That failure is the motivation for Double ML.
+
+**After the lecture**, a more substantial notebook will walk you through:
+
+- Running the three FWL steps manually and verifying the coefficient matches
+- Deliberately breaking OLS partialling by making the confounder non-linear
+- Implementing cross-fitting from scratch
+- Comparing all four estimators on the same data
+
+That notebook builds directly on figures and code from Monday's lecture, so it is worth coming prepared.
+
+**Environment check** — make sure your setup is ready before Monday:
+
+```bash
+# From the repo root — should take under a second
+quarto preview week11/week11_teaser.qmd
+```
+
+---
+
+*Lecture slides and the post-lecture notebook will be posted to GitHub after Monday's session.*
