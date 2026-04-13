@@ -1,0 +1,846 @@
+---
+title: "Controlling for Confounders"
+subtitle: "The Frisch-Waugh-Lovell Theorem"
+author: "Tom Hackenberg · Block 2"
+date: "13 April 2025"
+format:
+  revealjs:
+    theme: default
+    slide-number: true
+    width: 1280
+    height: 720
+    embed-resources: true
+    code-line-numbers: false
+    highlight-style: github
+    fig-align: center
+execute:
+  eval: true
+  echo: false
+  warning: false
+  message: false
+---
+
+```{python}
+#| label: setup
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold
+
+rng = np.random.default_rng(99)
+n   = 500
+W   = rng.normal(0, 1, n)
+T   = 2.0 * W + rng.normal(0, 1, n)
+tau_true = 1.5
+Y   = tau_true * T + 3.0 * W + rng.normal(0, 1, n)
+data = pd.DataFrame({"W": W, "T": T, "Y": Y})
+
+plt.rcParams.update({
+    "figure.facecolor":  "white",
+    "axes.facecolor":    "#f8fafc",
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
+    "font.size": 12,
+})
+```
+
+# Controlling for Confounders {background-color="#1a2744"}
+
+### The Frisch-Waugh-Lovell Theorem
+
+*What does "controlling for X" actually mean?*
+
+`Causal Inference · MSc · Week 11 of 15 · 120 min`
+
+---
+
+## Roadmap — the lecture {.smaller}
+
+| Part | Topic | Time |
+|---|---|---|
+| **1 — Geometry** | What regression does in space | ~25 min |
+| **2 — Theorem** | FWL: proof + numerical verification | ~20 min |
+| **3 — Failure modes** | When OLS FWL breaks | ~20 min |
+| **4 — Double ML** | Replace OLS with ML | ~20 min |
+| **5 — Neyman** | Why the "double" matters | ~10 min |
+| **Checkpoints** | Three exam-style questions | woven in |
+
+::: {.notes}
+Welcome. Today is the algebraic engine of the entire block — Weeks 12 and 15 both build directly on what we do here, so investing in understanding FWL deeply pays compound interest later.
+
+The goal for this lecture is unusually precise: by the end, students should be able to explain what "controlling for X" means without using the words "holding constant." That phrase is a description, not an explanation. FWL gives the actual explanation.
+
+Pacing note: Part 1 (geometry) is the hardest section conceptually, even though it has no formulas. Slow down there. The theorem in Part 2 will land much more easily if the geometry has clicked first.
+:::
+
+---
+
+## Roadmap — your payoff {.smaller}
+
+**Three audiences, three payoffs:**
+
+🎓 **Social science** — what "controlling for" *means* conceptually, not just how to do it. Parts 1–2 are your core.
+
+💻 **CS / ML** — the algorithm and precisely where it breaks. Parts 3–4 and the cross-fitting diagram.
+
+📈 **Econ / management** — when to trust an estimate and when to be suspicious. Parts 2–3 and the comparison table.
+
+::: {.callout-note}
+The thread across weeks: **FWL** → **Double ML** → **CATE** (Weeks 11–12–15). Today is the algebraic engine. Everything from here builds on this.
+:::
+
+
+# Part 1 · Geometry {background-color="#1a2744"}
+
+*Before any formula — what is regression actually doing?*
+
+
+---
+
+## The number that should make you nervous 
+
+:::: {.columns}
+::: {.column width="55%" .smaller }
+You run OLS of sales on ad spend: $\hat\beta = 3.2$
+
+£1,000 more in ad spend → £3,200 more sales.
+
+**The problem:** firms with better products advertise more *and* sell more. Quality drives both — it confounds the comparison.
+
+:::
+::: {.column width="45%"}
+```{=html}
+<svg viewBox="0 0 320 240" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:300px;margin:auto;display:block;margin-top:10px">
+  <defs>
+    <marker id="arrRed0" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+    <marker id="arrGreen0" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+  </defs>
+  <circle cx="160" cy="44" r="38" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="160" y="39" text-anchor="middle" font-size="12" font-weight="bold" fill="#991b1b">Product</text>
+  <text x="160" y="54" text-anchor="middle" font-size="12" font-weight="bold" fill="#991b1b">Quality</text>
+  <circle cx="55" cy="180" r="38" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="55" y="175" text-anchor="middle" font-size="11" fill="#1e293b">Ad</text>
+  <text x="55" y="190" text-anchor="middle" font-size="11" fill="#1e293b">Spend</text>
+  <circle cx="265" cy="180" r="38" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="265" y="185" text-anchor="middle" font-size="12" fill="#1e293b">Sales</text>
+  <line x1="137" y1="74" x2="83" y2="148" stroke="#dc2626" stroke-width="2" marker-end="url(#arrRed0)"/>
+  <line x1="183" y1="74" x2="237" y2="148" stroke="#dc2626" stroke-width="2" marker-end="url(#arrRed0)"/>
+  <line x1="95" y1="180" x2="223" y2="180" stroke="#16a34a" stroke-width="2.2" marker-end="url(#arrGreen0)"/>
+  <text x="160" y="173" text-anchor="middle" font-size="11" fill="#15803d" font-style="italic">β = ?</text>
+  <text x="82" y="118" font-size="10" fill="#dc2626" font-style="italic">backdoor</text>
+  <text x="208" y="118" font-size="10" fill="#dc2626" font-style="italic">backdoor</text>
+</svg>
+```
+:::
+::::
+
+::: {.callout-important .smaller}
+**The question for today:** when you add quality as a control, what does OLS *actually do* — and why does that fix the bias?
+:::
+
+---
+
+Think of $Y$, $T$, $X$ as **vectors in $\mathbb{R}^n$** — one coordinate per observation. Regression is **projection**.
+
+```{=html}
+<svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" style="width:96%;max-width:760px;margin:auto;display:block">
+  <defs>
+    <marker id="arrT" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+    <marker id="arrThat" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#9ca3af"/>
+    </marker>
+    <marker id="arrTtilde" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+  </defs>
+  <rect x="0" y="255" width="760" height="42" fill="#dbeafe" rx="3"/>
+  <line x1="30" y1="273" x2="720" y2="273" stroke="#2563eb" stroke-width="2.2"/>
+  <text x="728" y="278" font-size="15" fill="#1d4ed8" font-style="italic" font-weight="bold">col(X)</text>
+  <text x="260" y="290" font-size="12" fill="#3b82f6" font-style="italic">(subspace spanned by your controls)</text>
+  <circle cx="100" cy="273" r="5" fill="#1e293b"/>
+  <line x1="100" y1="273" x2="472" y2="75" stroke="#dc2626" stroke-width="3" marker-end="url(#arrT)"/>
+  <text x="484" y="70" font-size="18" font-weight="bold" fill="#dc2626">T</text>
+  <text x="484" y="90" font-size="12" fill="#dc2626">raw treatment</text>
+  <line x1="100" y1="273" x2="466" y2="273" stroke="#9ca3af" stroke-width="2" stroke-dasharray="7,4" marker-end="url(#arrThat)"/>
+  <text x="240" y="250" font-size="12" fill="#6b7280" font-style="italic">T̂ = X(X′X)⁻¹X′T  (the part of T that X explains)</text>
+  <line x1="478" y1="264" x2="478" y2="85" stroke="#16a34a" stroke-width="3" marker-end="url(#arrTtilde)"/>
+  <text x="492" y="185" font-size="17" font-weight="bold" fill="#15803d">T̃</text>
+  <text x="492" y="205" font-size="13" fill="#15803d">⊥ col(X)</text>
+  <text x="492" y="222" font-size="11" fill="#15803d" font-style="italic">(what X cannot explain)</text>
+  <polyline points="460,273 460,255 478,255" fill="none" stroke="#9ca3af" stroke-width="1.8"/>
+</svg>
+```
+
+::: {.callout-tip}
+**T̃ is not "T with X removed."** It is the variation in T that X **cannot predict**. T̃ is orthogonal to col(X) by construction — that is what residualising does.
+:::
+
+
+---
+
+Do the same for $Y$. Both residuals $\tilde T$ and $\tilde Y$ land in the space $X$ knows nothing about.
+
+```{=html}
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" style="width:96%;max-width:760px;margin:auto;display:block">
+  <defs>
+    <marker id="arrT2" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+    <marker id="arrTtilde2" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+    <marker id="arrY" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d97706"/>
+    </marker>
+    <marker id="arrYtilde" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#92400e"/>
+    </marker>
+  </defs>
+  <rect x="0" y="28" width="760" height="210" fill="#f0fdf4" rx="3" opacity="0.55"/>
+  <text x="22" y="48" font-size="12" fill="#15803d" font-style="italic">← space orthogonal to col(X) — T̃ and Ỹ both live here →</text>
+  <rect x="0" y="242" width="760" height="42" fill="#dbeafe" rx="3"/>
+  <line x1="30" y1="260" x2="720" y2="260" stroke="#2563eb" stroke-width="2.2"/>
+  <text x="728" y="265" font-size="14" fill="#1d4ed8" font-style="italic" font-weight="bold">col(X)</text>
+  <circle cx="100" cy="260" r="5" fill="#1e293b"/>
+  <line x1="100" y1="260" x2="488" y2="68" stroke="#dc2626" stroke-width="2.5" stroke-dasharray="9,3" marker-end="url(#arrT2)"/>
+  <text x="496" y="63" font-size="15" font-weight="bold" fill="#dc2626">T</text>
+  <line x1="492" y1="250" x2="492" y2="78" stroke="#16a34a" stroke-width="3" marker-end="url(#arrTtilde2)"/>
+  <text x="505" y="170" font-size="16" font-weight="bold" fill="#15803d">T̃</text>
+  <polyline points="474,260 474,242 492,242" fill="none" stroke="#9ca3af" stroke-width="1.6"/>
+  <line x1="100" y1="260" x2="278" y2="78" stroke="#d97706" stroke-width="2.5" stroke-dasharray="9,3" marker-end="url(#arrY)"/>
+  <text x="262" y="68" font-size="15" font-weight="bold" fill="#d97706">Y</text>
+  <line x1="282" y1="250" x2="282" y2="88" stroke="#92400e" stroke-width="3" marker-end="url(#arrYtilde)"/>
+  <text x="245" y="172" font-size="16" font-weight="bold" fill="#92400e">Ỹ</text>
+  <polyline points="264,260 264,242 282,242" fill="none" stroke="#9ca3af" stroke-width="1.6"/>
+  <line x1="282" y1="150" x2="492" y2="145" stroke="#1a2744" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="348" y="138" font-size="14" fill="#1a2744" font-weight="bold">β̂ = slope of Ỹ on T̃</text>
+</svg>
+```
+
+
+---
+
+We have not written a single formula yet — and we already know what $\hat\beta$ is.
+
+$\hat\beta$ is the slope between $\tilde Y$ and $\tilde T$: both stripped of everything $X$ can linearly explain.
+
+<br>
+
+**"Controlling for $X$" means working in the space orthogonal to $X$.**
+
+The formula is just the algebraic statement of the picture we just drew.
+
+::: {.callout-note}
+Every coefficient in every multivariate OLS you have ever run is already a partialling-out estimator. FWL proves it — and in doing so tells you exactly when the approach works and exactly when it fails.
+:::
+
+
+# Part 2 · The Theorem {background-color="#1a2744"}
+
+*Formalise what the geometry already showed*
+
+
+---
+
+## The Frisch-Waugh-Lovell Theorem {.smaller}
+
+**Theorem (FWL, 1933–1963)**
+
+The OLS coefficient $\hat\beta$ on $T$ in the full regression $Y = \alpha + \beta T + \gamma' X + \varepsilon$ is *numerically identical* to the coefficient from:
+
+| Step | Operation | Result |
+|---|---|---|
+| **1** | Regress $T$ on $X$ → save residuals | $\tilde T$ — variation in T unexplained by X |
+| **2** | Regress $Y$ on $X$ → save residuals | $\tilde Y$ — variation in Y unexplained by X |
+| **3** | Regress $\tilde Y$ on $\tilde T$ (no intercept) | $\hat\beta$ — *identical to the full regression* |
+
+Steps 1 and 2 can be done in either order.
+
+
+---
+
+::: {.callout-warning}
+**Both sides must be residualised.**
+
+Regressing raw $Y$ on $\tilde T$ — skipping Step 2 — gives a *different* estimator.
+
+Raw $Y$ still contains $\gamma' X$, the direct influence of quality on sales. Since quality correlates with $\tilde T$ through the unpartialled outcome side, $\hat\beta$ picks up part of quality's effect and inflates above the true value.
+
+Nothing in the regression output flags this mistake. This is the most common FWL implementation error. The diagnostic: if your FWL coefficient disagrees with the full OLS, check whether you residualised both sides.
+:::
+
+
+---
+
+```{python}
+#| echo: true
+#| eval: true
+T_s = pd.Series(T, name="T");  W_s = pd.Series(W, name="W")
+
+# Step 1 — residualise T on W
+T_tilde = sm.OLS(T_s, sm.add_constant(W_s)).fit().resid
+
+# Step 2 — residualise Y on W
+Y_tilde = sm.OLS(Y, sm.add_constant(W_s)).fit().resid
+
+# Step 3 — regress Ỹ on T̃
+beta_fwl  = sm.OLS(Y_tilde, T_tilde).fit().params.iloc[0]
+beta_full = sm.OLS(Y, sm.add_constant(data[["T", "W"]])).fit().params["T"]
+
+print(f"Full OLS β̂  = {beta_full:.10f}")
+print(f"FWL Step 3  = {beta_fwl:.10f}")
+print(f"Difference  = {abs(beta_full - beta_fwl):.2e}")
+```
+
+*Post-lecture notebook: reproduce all three steps, then plot $\tilde Y$ against $\tilde T$.*
+
+
+---
+
+## Proof sketch — the annihilator matrix {.smaller}
+
+> *Optional — follow the algebra or trust the picture*
+
+Define $M_X = I - X(X'X)^{-1}X'$. Three properties:
+
+| Property | Statement | Meaning |
+|---|---|---|
+| **Idempotent** | $M_X^2 = M_X$ | Projecting twice = projecting once |
+| **Annihilates $X$** | $M_X X = 0$ | Any vector in col($X$) maps to zero |
+| **Projects to col$(X)^\perp$** | $M_X v \perp X$ for any $v$ | Output is always orthogonal to $X$ |
+
+Note $M_X T = \tilde T$ and $M_X Y = \tilde Y$ — precisely the FWL residuals. Therefore:
+
+$$\hat\beta_{\text{OLS}} = (T' M_X T)^{-1} T' M_X Y = (\tilde T' \tilde T)^{-1} \tilde T' \tilde Y = \hat\beta_{\text{FWL}} \qquad \square$$
+
+
+---
+
+## ✎ Checkpoint 1 — the question
+
+**Part A — explain**
+
+In words: why does Step 3 of FWL give *exactly* the same coefficient as full OLS? What is it about $\tilde T$ that makes the equivalence hold?
+
+<br>
+
+**Part B — diagnose**
+
+A colleague runs the three FWL steps and gets $\hat\beta = 1.7$.
+The full OLS gives $\hat\beta = 1.5$.
+Assuming no arithmetic errors — what went wrong?
+
+. . .
+
+*Hint: what is $\tilde T$ orthogonal to? What does that mean for adding $X$ to Step 3?*
+
+
+---
+
+## Checkpoint 1 — Part A {.smaller}
+
+**Why does Step 3 give exactly the same number as the full regression?**
+
+$\tilde T$ is orthogonal to col($X$) by construction — that is literally what residualising does.
+
+Adding $X$ as a regressor in Step 3 would change nothing: $X$ has no additional explanatory power for anything already orthogonal to it.
+
+The full regression and FWL Step 3 are solving the same optimisation in the same space. Exact equality follows — not approximately, to machine precision.
+
+::: {.callout-note}
+The geometry says the same thing: $\tilde T$ lives in the orthogonal complement of col($X$). Regressing in that space is equivalent to the full regression restricted to that space.
+:::
+
+
+---
+
+## Checkpoint 1 — Part B {.smaller}
+
+**What procedural error produces $\hat\beta = 1.7$ instead of $1.5$?**
+
+The colleague residualised $T$ (Step 1) correctly, but regressed **raw $Y$** on $\tilde T$ instead of $\tilde Y$ on $\tilde T$.
+
+Raw $Y$ still contains $\gamma' X$ — quality's direct effect on sales. Since quality correlates with $\tilde T$ through the unpartialled outcome side, $\hat\beta$ picks up part of quality's effect on sales and inflates above the true 1.5.
+
+<br>
+
+**Rule: both variables must be residualised. Skipping either side breaks the equivalence.**
+
+::: {.callout-note}
+**Exam signal:** diagnosing a FWL / full OLS mismatch is a fair exam question. The answer always traces back to one of the two residuals being wrong or missing.
+:::
+
+
+# Part 3 · When It Breaks {background-color="#1a2744"}
+
+*FWL is exact — but only if you partial out the right things, correctly*
+
+
+---
+
+## Failure mode 1 — the collider trap
+
+FWL tells you *how* to partial out. Not *what* to partial out. That is a DAG question.
+
+```{=html}
+<svg viewBox="0 0 720 255" xmlns="http://www.w3.org/2000/svg" style="width:96%;max-width:720px;margin:auto;display:block">
+  <defs>
+    <marker id="aC" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+    <marker id="aG2" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+    <marker id="aB" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <line x1="360" y1="0" x2="360" y2="255" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="180" y="22" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">Confounder C</text>
+  <text x="180" y="38" text-anchor="middle" font-size="12" fill="#64748b">causes both T and Y</text>
+  <circle cx="180" cy="90" r="34" fill="#fee2e2" stroke="#dc2626" stroke-width="2.2"/>
+  <text x="180" y="95" text-anchor="middle" font-size="14" font-weight="bold" fill="#991b1b">C</text>
+  <circle cx="80" cy="190" r="34" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="80" y="195" text-anchor="middle" font-size="13" fill="#1e293b">T</text>
+  <circle cx="280" cy="190" r="34" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="280" y="195" text-anchor="middle" font-size="13" fill="#1e293b">Y</text>
+  <line x1="158" y1="118" x2="105" y2="163" stroke="#dc2626" stroke-width="2" marker-end="url(#aC)"/>
+  <line x1="202" y1="118" x2="255" y2="163" stroke="#dc2626" stroke-width="2" marker-end="url(#aC)"/>
+  <line x1="116" y1="190" x2="242" y2="190" stroke="#16a34a" stroke-width="2.2" marker-end="url(#aG2)"/>
+  <text x="180" y="240" text-anchor="middle" font-size="13" fill="#16a34a" font-weight="bold">✓ Control for C</text>
+
+  <text x="540" y="22" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">Collider L</text>
+  <text x="540" y="38" text-anchor="middle" font-size="12" fill="#64748b">caused by both T and Y</text>
+  <circle cx="440" cy="190" r="34" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="440" y="195" text-anchor="middle" font-size="13" fill="#1e293b">T</text>
+  <circle cx="640" cy="190" r="34" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="640" y="195" text-anchor="middle" font-size="13" fill="#1e293b">Y</text>
+  <circle cx="540" cy="90" r="34" fill="#dbeafe" stroke="#2563eb" stroke-width="2.2"/>
+  <text x="540" y="95" text-anchor="middle" font-size="14" font-weight="bold" fill="#1d4ed8">L</text>
+  <line x1="462" y1="163" x2="515" y2="118" stroke="#2563eb" stroke-width="2" marker-end="url(#aB)"/>
+  <line x1="618" y1="163" x2="565" y2="118" stroke="#2563eb" stroke-width="2" marker-end="url(#aB)"/>
+  <line x1="476" y1="190" x2="602" y2="190" stroke="#16a34a" stroke-width="2.2" marker-end="url(#aG2)"/>
+  <text x="540" y="240" text-anchor="middle" font-size="13" fill="#dc2626" font-weight="bold">✗ Do NOT control for L</text>
+</svg>
+```
+
+**Draw your DAG before running anything.** FWL on the wrong adjustment set gives an exact answer to the wrong question.
+
+
+---
+
+## Failure mode 2 — non-linear confounders
+
+OLS residualisation removes only the **linear** part of $X$'s influence on $T$.
+
+```{python}
+#| label: nonlinear-plot
+#| fig-height: 3.2
+#| fig-width: 10
+
+rng2 = np.random.default_rng(42)
+n_nl = 400
+W_nl = rng2.uniform(-2.5, 2.5, n_nl)
+T_nl = W_nl**2 + rng2.normal(0, 0.5, n_nl)
+Y_nl = 1.5 * T_nl + 2.0 * W_nl**2 + rng2.normal(0, 1, n_nl)
+T_tilde_lin = sm.OLS(T_nl, sm.add_constant(W_nl)).fit().resid
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.2))
+ax = axes[0]
+ax.scatter(W_nl, T_nl, alpha=0.25, s=14, color="#dc2626")
+x_fit = np.linspace(-2.5, 2.5, 200)
+ax.plot(x_fit, np.polyval(np.polyfit(W_nl, T_nl, 1), x_fit),
+        color="#6b7280", lw=2.5, linestyle="--", label="OLS linear fit")
+ax.plot(x_fit, x_fit**2, color="#2563eb", lw=2.5, label="true: W²")
+ax.set_xlabel("W  (confounder)", fontsize=12); ax.set_ylabel("T  (treatment)", fontsize=12)
+ax.set_title("Step 1 input: T vs W", fontsize=12, fontweight="bold")
+ax.legend(fontsize=10); ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+
+ax = axes[1]
+ax.scatter(W_nl, T_tilde_lin, alpha=0.25, s=14, color="#16a34a")
+ax.axhline(0, color="#6b7280", lw=1.5, linestyle="--")
+ax.plot(x_fit, np.polyval(np.polyfit(W_nl, T_tilde_lin, 2), x_fit),
+        color="#dc2626", lw=2.5, label="residual trend")
+ax.set_xlabel("W  (confounder)", fontsize=12); ax.set_ylabel("T̃  (linear residual)", fontsize=12)
+ax.set_title("T̃ after linear partialling: curve still visible", fontsize=12, fontweight="bold")
+ax.legend(fontsize=10); ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+plt.tight_layout(); plt.show()
+```
+
+
+---
+
+**T̃ is free of the *linear* effect of X — not free of X.**
+
+That is a strictly weaker guarantee.
+
+If residuals show structure when plotted against a control, partialling is incomplete — and $\hat\beta$ is biased. The regression output gives no warning.
+
+::: {.callout-warning}
+This is the gap that Double ML closes. A flexible ML model in Steps 1 & 2 fits the true curve — not just a straight line. The residuals it produces are genuinely orthogonal to $X$, not just linearly orthogonal.
+:::
+
+
+---
+
+## Failure mode 3 — high dimensions {.smaller}
+
+| Regime | What breaks |
+|---|---|
+| $p > n$ | $(X'X)$ is singular — OLS cannot be computed |
+| $p$ close to $n$ | OLS overfits Steps 1 & 2 — residuals are noise |
+| Non-linear confounders | Residuals still contain confounding |
+| Many correlated controls | $\tilde T$ has near-zero variance → huge SE on $\hat\beta$ |
+
+The right question is not "can I include more controls?" **The right question is: can I partial out $X$ from $T$ and $Y$ correctly at this scale?**
+
+OLS says no beyond a certain point. But the *structure* of FWL still holds — we just need a more flexible tool for the partialling steps. That is what Double ML provides.
+
+
+---
+
+## ✎ Checkpoint 2 — the question
+
+A public health researcher estimates the effect of air pollution ($T$) on hospital admissions ($Y$), controlling **linearly** for income ($X$).
+
+Income has a strongly **concave** effect on both pollution exposure and health outcomes.
+
+They report $\hat\beta = 0.8$ with a tight confidence interval.
+
+<br>
+
+**Should you trust this? What exactly goes wrong — and is the bias visible in the output?**
+
+. . .
+
+*Hint: what does OLS partialling remove from $T$? What does it leave behind?*
+
+
+---
+
+## Checkpoint 2 — answer {.smaller}
+
+**No. Linear partialling removes only the linear component of income's influence.**
+
+The concave (non-linear) part remains inside $\tilde T$ — so $\tilde T$ is not truly free of income.
+
+**The bias chain:**
+
+1. OLS fits a straight line through (income, pollution) in Step 1
+2. The concave residual stays in $\tilde T$ — high pollution at very low *and* very high incomes
+3. That residual correlates with hospital admissions through income's non-linear health effect
+4. Step 3 attributes that correlation to pollution
+
+**Is the bias visible in the output?** No. Small standard errors and a significant p-value confirm statistical power, not correct identification. The diagnostic is to plot $\tilde T$ against income: a visible curve means partialling is incomplete.
+
+
+# Part 4 · Double Machine Learning {background-color="#1a2744"}
+
+*Replace OLS in Steps 1 & 2 — the fix is almost embarrassingly simple*
+
+
+---
+
+## The simple insight {.smaller}
+
+FWL says: partial out $X$ from $T$ and $Y$, then regress residuals.
+
+**It does not say to use OLS for the partialling.**
+
+<br>
+
+Replace Steps 1 & 2 with any flexible ML learner:
+
+| Step | What we fit | Residual |
+|---|---|---|
+| **1a** | $\hat g(X) = \mathbb{E}[Y \mid X]$ via ML | $\tilde Y = Y - \hat g(X)$ |
+| **1b** | $\hat m(X) = \mathbb{E}[T \mid X]$ via ML | $\tilde T = T - \hat m(X)$ |
+| **2** | OLS of $\tilde Y$ on $\tilde T$ | $\hat\theta$ — causal effect |
+
+Any learner works: LASSO, Random Forest, Gradient Boosting, Neural Net.
+
+The FWL algebra is unchanged. ML does the heavy lifting in Steps 1 & 2.
+
+
+---
+
+## Why naïve swap fails {.smaller}
+
+Plugging ML directly into Steps 1 & 2 without care introduces two new problems:
+
+**Problem 1 — Regularisation**
+
+ML shrinks predictions toward the mean. Residuals are systematically too large. The signal in $\tilde T$ is distorted.
+
+**Problem 2 — Overfitting contamination**
+
+ML trained and evaluated on the *same* data memorises noise. In-sample residuals are too small — they under-represent true unexplained variation.
+
+<br>
+
+Both problems corrupt $\tilde T$ and $\tilde Y$ before Step 2 runs.
+
+**Cross-fitting fixes both.**
+
+
+---
+
+## Cross-fitting — the idea {.smaller}
+
+**The problem:** ML memorises training data. In-sample residuals are contaminated.
+
+**The solution:** for each observation, generate its residual from a model that *never saw it*.
+
+<br>
+
+This is K-fold cross-validation — but instead of evaluating prediction accuracy, you are generating **honest residuals** for the causal OLS.
+
+::: {.callout-tip}
+Each fold's residuals come from a model trained on all *other* folds. No overfitting contamination. The residuals are honest — as if you had infinite separate datasets.
+
+K = 5 is standard: 80% training data per round, stable across runs.
+:::
+
+---
+
+## Cross-fitting — the procedure
+
+```{=html}
+<svg viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg" style="width:96%;max-width:720px;margin:auto;display:block">
+  <defs>
+    <marker id="aDown" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#475569"/>
+    </marker>
+    <marker id="aRight2" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#475569"/>
+    </marker>
+  </defs>
+  <text x="16" y="65" font-size="12" fill="#64748b" font-weight="bold">Round 1</text>
+  <rect x="55" y="38" width="278" height="56" fill="#dbeafe" rx="6" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="194" y="63" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d4ed8">Fold 1 · TRAIN</text>
+  <text x="194" y="81" text-anchor="middle" font-size="11" fill="#3b82f6">fit ML model here</text>
+  <rect x="385" y="38" width="278" height="56" fill="#dcfce7" rx="6" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="524" y="61" text-anchor="middle" font-size="13" font-weight="bold" fill="#15803d">Fold 2 · PREDICT</text>
+  <text x="524" y="79" text-anchor="middle" font-size="12" fill="#16a34a">→ T̃₂, Ỹ₂</text>
+  <line x1="336" y1="66" x2="382" y2="66" stroke="#475569" stroke-width="1.8" marker-end="url(#aRight2)"/>
+  <text x="16" y="162" font-size="12" fill="#64748b" font-weight="bold">Round 2</text>
+  <rect x="55" y="135" width="278" height="56" fill="#dcfce7" rx="6" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="194" y="158" text-anchor="middle" font-size="13" font-weight="bold" fill="#15803d">Fold 1 · PREDICT</text>
+  <text x="194" y="176" text-anchor="middle" font-size="12" fill="#16a34a">→ T̃₁, Ỹ₁</text>
+  <rect x="385" y="135" width="278" height="56" fill="#dbeafe" rx="6" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="524" y="160" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d4ed8">Fold 2 · TRAIN</text>
+  <text x="524" y="178" text-anchor="middle" font-size="11" fill="#3b82f6">fit ML model here</text>
+  <line x1="382" y1="163" x2="336" y2="163" stroke="#475569" stroke-width="1.8" marker-end="url(#aRight2)"/>
+  <line x1="360" y1="28" x2="360" y2="205" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <rect x="130" y="228" width="460" height="46" rx="6" fill="#f8fafc" stroke="#64748b" stroke-width="1.8"/>
+  <text x="360" y="248" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e293b">Stack: {T̃₁, Ỹ₁, T̃₂, Ỹ₂}</text>
+  <text x="360" y="266" text-anchor="middle" font-size="12" fill="#64748b">full-sample honest residuals</text>
+  <line x1="194" y1="193" x2="278" y2="226" stroke="#475569" stroke-width="1.5" marker-end="url(#aDown)"/>
+  <line x1="524" y1="193" x2="442" y2="226" stroke="#475569" stroke-width="1.5" marker-end="url(#aDown)"/>
+  <rect x="230" y="302" width="260" height="36" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="360" y="325" text-anchor="middle" font-size="14" font-weight="bold" fill="#92400e">OLS of Ỹ on T̃ → θ̂</text>
+  <line x1="360" y1="276" x2="360" y2="300" stroke="#475569" stroke-width="1.8" marker-end="url(#aDown)"/>
+</svg>
+```
+
+
+---
+
+## DML — the algorithm
+
+```{python}
+#| echo: true
+#| eval: false
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold
+
+kf      = KFold(n_splits=5, shuffle=True, random_state=42)
+T_tilde = np.zeros(n)
+Y_tilde = np.zeros(n)
+
+for train_idx, val_idx in kf.split(X):
+    for target, store in [(T, T_tilde), (Y, Y_tilde)]:
+        rf = RandomForestRegressor(n_estimators=200, random_state=42)
+        rf.fit(X[train_idx], target[train_idx])
+        store[val_idx] = target[val_idx] - rf.predict(X[val_idx])
+
+# Pure FWL on honest residuals
+theta_dml = np.dot(T_tilde, Y_tilde) / np.dot(T_tilde, T_tilde)
+```
+
+::: {.callout-note}
+**Post-lecture notebook:** you implement this from scratch — same DGP, five-fold cross-fitting, and a four-estimator comparison figure reused in the Week 12 deck.
+:::
+
+
+---
+
+## DML — when to use what
+
+| Estimator | Non-linearity | High-$p$ | Valid SE |
+|---|---|---|---|
+| Naïve OLS (no controls) | ✗ | — | ✗ biased |
+| OLS + linear controls | ✗ | ✗ | ✓ if truly linear |
+| OLS + FWL (manual) | ✗ | ✗ | ✓ exact |
+| **Double ML** | **✓** | **✓** | **✓ $\sqrt{n}$-consistent** |
+
+<br>
+
+OLS + FWL is not inferior to DML in low dimensions — it is exact. DML is needed when OLS's linear partialling assumption breaks.
+
+**Use FWL to build intuition. Use DML in practice.**
+
+
+# Part 5 · Neyman Orthogonality {background-color="#1a2744"}
+
+*Why residualising both sides is structurally necessary*
+
+
+---
+
+## Why the "double" matters
+
+**The question:** DML residualises *both* $T$ and $Y$. Why not just $T$?
+
+<br>
+
+**Single residualisation** — residualise $T$ only
+
+Errors in $\hat m(X)$ enter $\hat\theta$ **linearly** — proportional to $\delta_m$. If ML converges at rate $n^{-1/4}$, bias shrinks too slowly. Confidence intervals fail at any sample size.
+
+<br>
+
+**Double residualisation** — residualise both
+
+Errors in $\hat m$ and $\hat g$ enter as a **product** $\delta_m \times \delta_g$ — second-order small. If both converge at $n^{-1/4}$, the product is $n^{-1/2}$ — valid inference.
+
+
+---
+
+## Why the "double" matters — the intuition
+
+::: {.callout-tip}
+**The ruler analogy**
+
+Your ruler is off by 1mm. Your scale is off by 1g.
+
+Combined error ≈ 1mm × 1g ≈ 0. Not 2mm, not 2g.
+
+Two small errors **multiplied** are negligible. One is not.
+
+DML exploits this multiplicative structure — by residualising both sides, errors from the two ML models cancel each other at second order.
+:::
+
+
+---
+
+## Neyman orthogonality — formal {.smaller}
+
+> *Skippable — included for exam coverage*
+
+The DML score function for the partially linear model:
+
+$$\psi(\theta;\, \hat g, \hat m) = \bigl(Y - \theta D - \hat g(X)\bigr) \cdot \tilde T$$
+
+**Neyman orthogonality** means the score's derivative with respect to the nuisance functions vanishes at the truth:
+
+$$\frac{\partial}{\partial g} \,\mathbb{E}[\psi(\theta_0;\, g, m_0)] \bigg|_{g = g_0} = 0$$
+
+Small perturbations in $\hat g$ and $\hat m$ produce zero first-order effect on $\hat\theta$. ML errors enter at second order only — hence the $\delta_m \times \delta_g$ product structure.
+
+Residualising only $T$ gives a score where $\partial\psi/\partial g \neq 0$ — error enters linearly. Residualising $Y$ achieves orthogonality.
+
+*Exam signal: you will not be asked to derive the score. You may be asked why single residualisation fails.*
+
+
+---
+
+## ✎ Checkpoint 3 — the question
+
+A colleague implements DML:
+
+- Step 1: fit $\hat m(X) = \mathbb{E}[T \mid X]$ via Random Forest → $\tilde T = T - \hat m(X)$
+- Step 2: regress **raw $Y$** (not residualised) on $\tilde T$
+
+They argue this saves computation and "$Y$ doesn't need cleaning."
+
+<br>
+
+**Are they right? What bias does this introduce — and does it vanish as $n \to \infty$?**
+
+. . .
+
+*Hint: what does raw $Y$ still contain? How do errors in $\hat m$ enter the estimate — linearly or as a product?*
+
+
+---
+
+## Checkpoint 3 — answer {.smaller}
+
+**The colleague is wrong.** Raw $Y$ still contains $g(X)$ — $X$'s influence on the outcome.
+
+The score becomes $g(X) \cdot \tilde T + \varepsilon \cdot \tilde T$. The second term vanishes. The first does not — unless $\hat m$ is perfect, which it never is.
+
+| Setup | Bias size | Vanishes at $\sqrt{n}$ rate? |
+|---|---|---|
+| Single residualisation | $O(\delta_m)$ — linear in ML error | **No** |
+| Double residualisation | $O(\delta_m \times \delta_g)$ | **Yes** |
+
+If ML converges at $n^{-1/4}$: single → bias $\sim n^{-1/4}$ (too slow), double → $\sim n^{-1/2}$ (valid).
+
+This is not an asymptotic refinement. It is a structural flaw that persists at every sample size — the colleague's shortcut permanently invalidates inference.
+
+
+---
+
+## What we covered
+
+1. **Geometry** — "controlling for $X$" means working in the space orthogonal to col($X$)
+
+2. **FWL theorem** — every OLS coefficient is a partialling-out estimator, exactly, to machine precision
+
+3. **Three failure modes** — collider bias, non-linear confounders, high dimensions
+
+4. **Double ML** — replace OLS partialling with ML + cross-fitting; the FWL algebra is unchanged
+
+5. **Neyman orthogonality** — residualise both sides so errors multiply, not add
+
+
+---
+
+## Week 12 preview
+
+$$\underbrace{\text{FWL}}_{\text{today}} \;\longrightarrow\; \underbrace{\text{DML}}_{\text{Week 12}} \;\longrightarrow\; \underbrace{\text{CATE}}_{\text{Week 15}}$$
+
+**Next week:** implement DML end-to-end using `doubleml` and `econml` — production implementations with valid standard errors and confidence intervals.
+
+We connect to the **R-learner** for heterogeneous treatment effects: not just the average effect, but *who benefits and by how much*.
+
+::: {.callout-note}
+**Post-lecture notebook is live.** It builds directly on today — all three FWL steps in code, then breaking OLS partialling on purpose, then a from-scratch DML implementation. The figures you produce are reused in next week's deck.
+:::
+
+---
+
+## Appendix — proof of $M_X$ properties {.smaller}
+
+$M_X = I - X(X'X)^{-1}X'$
+
+**Idempotent:** $M_X^2 = M_X - M_X X(X'X)^{-1}X' = M_X - 0 = M_X$
+
+**Annihilates $X$:** $M_X X = X - X(X'X)^{-1}X'X = X - X = 0$
+
+**Symmetric:** $(M_X)' = I - X\bigl((X'X)^{-1}\bigr)'X' = M_X$ since $(X'X)^{-1}$ is symmetric
+
+**Therefore:**
+
+$$\hat\beta_\text{OLS} = (T' M_X T)^{-1} T' M_X Y = (\tilde T' \tilde T)^{-1} \tilde T' \tilde Y = \hat\beta_\text{FWL} \qquad \square$$
