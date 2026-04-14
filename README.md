@@ -57,7 +57,7 @@ renv::restore(prompt = FALSE)
 ### 5. Open a notebook
 
 ```bash
-quarto preview week09/week09_notebook.qmd
+uv run quarto quarto preview week09/week09_notebook.qmd
 ```
 
 Quarto reads `.venv/bin/python` from `_quarto.yml` automatically — no activation step needed.
