@@ -3,9 +3,12 @@ project:
   output-dir: _output
 
 execute:
+  # python: .venv/bin/python
   freeze: false
 
 format:
+  revealjs:
+    theme: [default]
   html:
     theme: cosmo
     highlight-style: github

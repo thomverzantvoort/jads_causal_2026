@@ -20,6 +20,9 @@ dependencies = [
     "nbformat>=5.10.4",
     "nbclient>=0.10.4",
     # week 12–15 (add when needed)
-    # "doubleml>=0.9",
-    # "econml>=0.15",
+    "doubleml>=0.9",
+    "econml>=0.15",
 ]
+
+[tool.uv]
+managed = true
