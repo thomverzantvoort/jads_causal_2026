@@ -1,0 +1,525 @@
+---
+title: "Week 12 — Double Machine Learning"
+subtitle: "From FWL to Valid Causal Inference at Scale · Instructor Version"
+author: "Tom Hackenberg · Block 2"
+date: "28 April 2025"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    code-fold: false
+    code-tools: true
+    highlight-style: github
+    fig-align: center
+    embed-resources: true
+execute:
+  eval: true
+  echo: true
+  warning: false
+  message: false
+  python: .venv/bin/python
+---
+
+> **Instructor version.** This notebook is identical to the _student version, but it contains full output interpretations and annotation. The student version you saw before is identical in code but has interpretation cells replaced with prompts. We walked though the projected version and you could follow along. This version is intended for study purposes only as it contains answers and explicit annotations for the code.
+
+---
+
+## Setup
+
+```{python}
+#| label: setup  
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold
+from sklearn.inspection import permutation_importance
+
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.facecolor":   "#f8fafc",
+    "axes.spines.top":  False,
+    "axes.spines.right":False,
+    "font.size": 12,
+})
+```
+
+---
+
+## 1 · The Data
+
+### The scenario
+
+(Same set-up as before) - A retailer runs digital ad campaigns across 600 customers. We observe **ad spend, sales, and six controls**. *We know from the firm's records that the true average effect of £1k more in ad spend is **£1.82k more in sales** — but that effect is not the same for everyone.*
+
+Our job this session: recover the true average effect using DML, and understand why simpler methods fail.
+
+```{python}
+#| label: simulate-data
+rng = np.random.default_rng(42)
+n   = 600
+
+# --- Controls ---
+brand_awareness  = rng.normal(0, 1, n)          # standardised brand strength score
+competitor_spend = rng.normal(0, 1, n)          # standardised competitor ad pressure
+seasonality      = np.sin(2 * np.pi * rng.uniform(0, 1, n))  # cyclical index
+customer_tenure  = rng.uniform(0, 10, n)        # years as customer, 0–10
+channel_mix      = rng.beta(2, 2, n)            # share of spend on social (vs search)
+region           = rng.choice([0.0, 0.3, -0.2], n)  # region fixed effects
+
+# Stack controls matrix
+X = np.column_stack([brand_awareness, competitor_spend, seasonality,
+                     customer_tenure, channel_mix, region])
+X_cols = ["brand_awareness","competitor_spend","seasonality",
+          "customer_tenure","channel_mix","region"]
+
+# --- Treatment: ad spend (£000s) ---
+# Firms with stronger brands spend more on ads (non-linear relationship)
+T = (2.0 * brand_awareness
+   + 0.8 * brand_awareness**2    # non-linear: brand awareness drives spend decisions
+   + 1.0 * seasonality
+   + region
+   + rng.normal(0, 1, n))
+
+# --- True heterogeneous effect ---
+# High-tenure customers are saturated — they respond less to advertising
+# tau(tenure) = 2.50 - 0.14 * tenure  →  E[tau] ≈ 1.82
+tau_i   = 2.5 - 0.14 * customer_tenure
+tau_true = tau_i.mean()
+
+# --- Outcome: sales revenue (£000s) ---
+Y = (tau_i * T                       # heterogeneous causal effect
+   + 3.0 * brand_awareness            # brand drives sales directly
+   + 1.5 * brand_awareness**2         # non-linear: same curve as on spend
+   - 1.0 * competitor_spend          # competitor pressure suppresses sales
+   + 2.0 * seasonality
+   + 0.5 * customer_tenure           # loyal customers buy more anyway
+   + region
+   + rng.normal(0, 1.5, n))
+
+# Assemble a readable dataframe
+df = pd.DataFrame({"sales": Y, "ad_spend": T,
+                   **dict(zip(X_cols, X.T))})
+
+print(f"Observations: {n}")
+print(f"True ATE:     £{tau_true:.2f}k per £1k ad spend")
+print(f"Effect range: £{tau_i.min():.2f}k (high tenure) → £{tau_i.max():.2f}k (new customers)")
+print(f"\nDataset preview:")
+print(df.describe().round(2))
+```
+
+::: {.callout-note}
+**What this data represents.** We simulated 600 customer-level observations. The key feature of this **DGP** is that brand awareness affects both ad spend decisions and sales outcomes through a **non-linear (quadratic) channel**. This is deliberately realistic — a brand that goes from weak to moderate strength gets a large advertising lift; from moderate to strong, diminishing returns set in. This non-linearity is what will defeat OLS and motivate DML.
+:::
+
+---
+
+## 2 · The Naïve Approach — OLS Without Controls
+
+Before reaching for any sophisticated method, a naïve analyst runs a simple regression of sales on ad spend.
+
+```{python}
+#| label: naive-ols
+T_s = pd.Series(T, name="ad_spend")
+model_naive = sm.OLS(Y, sm.add_constant(T_s)).fit()
+tau_naive   = model_naive.params["ad_spend"]
+
+print(model_naive.summary().tables[1])
+print(f"\nNaïve estimate:  £{tau_naive:.3f}k per £1k ad spend")
+print(f"True ATE:        £{tau_true:.3f}k")
+print(f"Bias:            {tau_naive - tau_true:+.3f}k")
+```
+
+::: {.callout-warning}
+**What this output tells us.** The naïve OLS estimate is **£3.21k** — nearly double the true effect. The regression is highly significant (t > 20, p ≈ 0), which makes it look reliable. It is not.
+
+The problem is confounding: firms with strong brands advertise more *and* sell more, independently of any causal advertising effect. OLS cannot distinguish "ad spend causes sales" from "both are driven by brand strength." The upward bias of +£1.40k is entirely due to this backdoor path through brand awareness.
+
+A marketing manager acting on this estimate would double the ad budget expecting a 3.2× return. The true return is 1.8×.
+:::
+
+---
+
+## 3 · Adding Controls — OLS with All Variables
+
+The natural fix: include the confounders as control variables.
+
+```{python}
+#| label: ols-controls
+Xdf = pd.DataFrame(X, columns=X_cols)
+Xdf.insert(0, "ad_spend", T)
+
+model_ctrl = sm.OLS(Y, sm.add_constant(Xdf)).fit()
+tau_ctrl   = model_ctrl.params["ad_spend"]
+
+print(model_ctrl.summary().tables[1])
+print(f"\nOLS + controls:  £{tau_ctrl:.3f}k per £1k ad spend")
+print(f"True ATE:        £{tau_true:.3f}k")
+print(f"Bias:            {tau_ctrl - tau_true:+.3f}k")
+```
+
+::: {.callout-warning}
+**Progress — but not enough.** Including all controls linearly brings the estimate down to **£2.84k**, a meaningful improvement over the naïve £3.21k. But we are still £1.02k above the truth.
+
+Why? Because OLS controls for brand awareness *linearly*. The true relationship between brand awareness and both ad spend and sales is quadratic — OLS fits a straight line through a curve and leaves the non-linear residual in the treatment variable. That contaminated residual is still correlated with sales.
+
+This is exactly the failure mode we saw in the Week 11 lecture: **T̃ is free of the linear effect of X, not free of X.**
+:::
+
+---
+
+## 4 · Making the Problem Visible
+
+Before fixing the issue, let's see it directly. After OLS partialling, the residual T̃ should be flat against any control — no remaining pattern. Let's check brand awareness.
+
+```{python}
+#| label: residual-diagnostic
+#| fig-height: 4
+#| fig-width: 10
+
+T_tilde_ols = sm.OLS(T, sm.add_constant(X)).fit().resid
+Y_tilde_ols = sm.OLS(Y, sm.add_constant(X)).fit().resid
+
+ba_grid = np.linspace(brand_awareness.min(), brand_awareness.max(), 200)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+# Left: T̃ vs brand_awareness
+ax = axes[0]
+ax.scatter(brand_awareness, T_tilde_ols, alpha=0.2, s=12, color="#dc2626")
+ax.axhline(0, color="#6b7280", lw=1.5, linestyle="--")
+trend = np.polyfit(brand_awareness, T_tilde_ols, 2)
+ax.plot(ba_grid, np.polyval(trend, ba_grid), color="#dc2626", lw=2.5,
+        label="residual trend (quadratic)")
+ax.set_xlabel("Brand Awareness"); ax.set_ylabel("T̃  (OLS residual)")
+ax.set_title("T̃ still contains brand awareness", fontweight="bold")
+ax.legend(fontsize=10)
+
+# Right: Ỹ vs T̃ (the FWL scatter)
+ax = axes[1]
+ax.scatter(T_tilde_ols, Y_tilde_ols, alpha=0.2, s=12, color="#2563eb")
+slope = np.polyfit(T_tilde_ols, Y_tilde_ols, 1)
+ax.plot(np.sort(T_tilde_ols), np.polyval(slope, np.sort(T_tilde_ols)),
+        color="#dc2626", lw=2.5, label=f"slope = {slope[0]:.2f}  (OLS FWL estimate)")
+ax.axline((0,0), slope=tau_true, color="#16a34a", lw=2, linestyle="--",
+          label=f"true ATE = {tau_true:.2f}")
+ax.set_xlabel("T̃  (OLS residual)"); ax.set_ylabel("Ỹ  (OLS residual)")
+ax.set_title("FWL scatter: slope is still biased", fontweight="bold")
+ax.legend(fontsize=10)
+
+plt.suptitle("After linear partialling — the non-linear confound remains",
+             fontsize=13, fontstyle="italic")
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-important}
+**Reading these plots.** The left panel shows T̃ — the OLS residual for ad spend after removing all linear control effects — plotted against brand awareness. A flat scatter would mean partialling is complete. Instead we see a clear U-shape: the quadratic brand awareness signal was not removed by linear OLS.
+
+The right panel shows the FWL scatter — Ỹ on T̃. The red line is the OLS FWL estimate (£2.84k). The green dashed line is the truth (£1.82k). The contaminated T̃ pulls the slope upward. We need a partialling step that actually removes the curve — not just the straight line.
+:::
+
+---
+
+## 5 · Manual DML — Cross-Fitted Random Forest
+
+Now we replace OLS in the partialling steps with a Random Forest, and use cross-fitting to generate honest residuals.
+
+```{python}
+#| label: manual-dml
+kf    = KFold(n_splits=5, shuffle=True, random_state=42)
+T_res = np.zeros(n)
+Y_res = np.zeros(n)
+
+for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+    X_train, X_val = X[train_idx], X[val_idx]
+
+    # Fit nuisance models on training fold only
+    rf_y = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
+    rf_t = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
+    rf_y.fit(X_train, Y[train_idx])
+    rf_t.fit(X_train, T[train_idx])
+
+    # Predict on held-out validation fold — genuinely out-of-sample
+    Y_res[val_idx] = Y[val_idx] - rf_y.predict(X_val)
+    T_res[val_idx] = T[val_idx] - rf_t.predict(X_val)
+
+    print(f"Fold {fold+1}: val size = {len(val_idx)}, "
+          f"Y R² = {1 - np.var(Y_res[val_idx])/np.var(Y[val_idx]):.3f}, "
+          f"T R² = {1 - np.var(T_res[val_idx])/np.var(T[val_idx]):.3f}")
+```
+
+```{python}
+#| label: dml-estimate
+# Step 3: OLS on honest residuals — pure FWL
+tau_dml  = (T_res @ Y_res) / (T_res @ T_res)
+sigma2   = np.mean((Y_res - tau_dml * T_res)**2)
+se_dml   = np.sqrt(sigma2 / np.sum(T_res**2))
+ci_lo    = tau_dml - 1.96 * se_dml
+ci_hi    = tau_dml + 1.96 * se_dml
+
+print(f"DML estimate:  £{tau_dml:.3f}k per £1k ad spend")
+print(f"Std error:     £{se_dml:.3f}k")
+print(f"95% CI:        [£{ci_lo:.3f}k, £{ci_hi:.3f}k]")
+print(f"True ATE:      £{tau_true:.3f}k")
+print(f"True in CI:    {'✓ Yes' if ci_lo < tau_true < ci_hi else '✗ No'}")
+```
+
+::: {.callout-note}
+**What this output tells us.** The DML estimate is **£1.90k** — very close to the true ATE of £1.82k. The remaining gap of £0.08k is sampling noise, not systematic bias.
+
+The 95% confidence interval [£1.74k, £2.06k] captures the true value. This is what "valid inference" means: if we ran this study 100 times on different samples from the same population, roughly 95 of those intervals would contain the true ATE.
+
+**Why cross-fitting matters here.** Each fold's residuals were generated by a model that never saw those observations. The Random Forest could not memorise the outcome for observations it was tested on. Without cross-fitting, the RF would predict too well in-sample, producing residuals too small to identify the true effect.
+:::
+
+---
+
+## 6 · The Residual Diagnostic — After DML
+
+The same diagnostic we ran after OLS partialling, now after DML partialling.
+
+```{python}
+#| label: dml-residual-diagnostic
+#| fig-height: 4
+#| fig-width: 10
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+# Left: T̃ vs brand_awareness after DML
+ax = axes[0]
+ax.scatter(brand_awareness, T_res, alpha=0.2, s=12, color="#16a34a")
+ax.axhline(0, color="#6b7280", lw=1.5, linestyle="--")
+trend_dml = np.polyfit(brand_awareness, T_res, 2)
+ax.plot(ba_grid, np.polyval(trend_dml, ba_grid), color="#16a34a", lw=2.5,
+        label="residual trend (quadratic)")
+ax.set_xlabel("Brand Awareness"); ax.set_ylabel("T̃  (DML residual)")
+ax.set_title("T̃ after DML — curve removed", fontweight="bold")
+ax.legend(fontsize=10)
+
+# Right: FWL scatter after DML
+ax = axes[1]
+ax.scatter(T_res, Y_res, alpha=0.2, s=12, color="#16a34a")
+slope_dml = np.polyfit(T_res, Y_res, 1)
+ax.plot(np.sort(T_res), np.polyval(slope_dml, np.sort(T_res)),
+        color="#dc2626", lw=2.5, label=f"slope = {slope_dml[0]:.2f}  (DML estimate)")
+ax.axline((0,0), slope=tau_true, color="#16a34a", lw=2, linestyle="--",
+          label=f"true ATE = {tau_true:.2f}")
+ax.set_xlabel("T̃  (DML residual)"); ax.set_ylabel("Ỹ  (DML residual)")
+ax.set_title("FWL scatter: slope now close to truth", fontweight="bold")
+ax.legend(fontsize=10)
+
+plt.suptitle("After DML partialling — non-linear confound is gone",
+             fontsize=13, fontstyle="italic")
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+**Compare these plots to Section 4.** The left panel now shows T̃ against brand awareness as essentially flat — the Random Forest has learned the non-linear relationship and removed it from both variables. The right panel shows the FWL scatter with a slope of £1.90k, nearly coinciding with the true ATE of £1.82k (green dashed). The surgery worked.
+:::
+
+---
+
+## 7 · Estimator Comparison
+
+```{python}
+#| label: comparison-plot
+#| fig-height: 4
+#| fig-width: 9
+
+fig, ax = plt.subplots(figsize=(9, 4))
+
+labels = ["True ATE", "Naïve OLS\n(no controls)",
+          "OLS +\nlinear controls", "DML\n(RF, 5-fold)"]
+values = [tau_true, tau_naive, tau_ctrl, tau_dml]
+colors = ["#64748b", "#dc2626", "#f59e0b", "#16a34a"]
+
+bars = ax.barh(labels, values, color=colors, height=0.5)
+ax.axvline(tau_true, color="#64748b", linestyle="--", lw=1.5,
+           alpha=0.7, label=f"True ATE = £{tau_true:.2f}k")
+
+for bar, val in zip(bars, values):
+    ax.text(val + 0.04, bar.get_y() + bar.get_height()/2,
+            f"£{val:.2f}k", va="center", fontsize=11)
+
+# CI for DML
+ax.errorbar(tau_dml, 3, xerr=1.96*se_dml,
+            fmt="none", color="#15803d", capsize=6, lw=2,
+            label=f"95% CI: [£{ci_lo:.2f}k, £{ci_hi:.2f}k]")
+
+ax.set_xlabel("Estimated effect of £1k ad spend on sales (£000s)")
+ax.set_title("Three estimators — same data, very different answers", fontsize=13)
+ax.legend(fontsize=10)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note}
+**Reading this chart.** The grey dashed line is the ground truth — £1.82k per £1k spent. The progression from left to right shows exactly what Week 11 predicted: naïve OLS is severely biased (red), linear controls help but the non-linear confound persists (amber), DML removes both linear and non-linear confounding and recovers the truth (green). The error bars on DML show the 95% confidence interval — a range we can trust.
+:::
+
+---
+
+## 8 · Inference — What the Numbers Actually Mean
+
+```{python}
+#| label: inference-table
+results = pd.DataFrame({
+    "Estimator":  ["Naïve OLS", "OLS + controls", "DML"],
+    "Estimate":   [tau_naive, tau_ctrl, tau_dml],
+    "Bias":       [tau_naive-tau_true, tau_ctrl-tau_true, tau_dml-tau_true],
+    "SE":         [None, None, se_dml],
+    "CI lower":   [None, None, ci_lo],
+    "CI upper":   [None, None, ci_hi],
+    "Valid CI":   ["No", "No", "Yes"],
+}).round(3)
+print(results.to_string(index=False))
+```
+
+::: {.callout-important}
+**Why standard errors matter as much as the point estimate.**
+
+The naïve OLS model also reports standard errors — but they are wrong by construction. They assume the residuals are truly unexplained variation in sales. They are not: the residuals contain brand awareness's influence, which is systematic, not random. So the naïve SE is too small, the t-statistic too large, and the p-value too small. The model looks more precise than it is.
+
+DML's SE of £0.082k is honest. It is computed from residuals that are genuinely unexplained — after the Random Forest has removed everything X can predict from both T and Y. When we say the 95% CI is [£1.74k, £2.06k], we mean it.
+
+**Practical interpretation.** A budget committee can act on DML's estimate: £1k more in ad spend returns between £1.74k and £2.06k in sales, with 95% confidence. That is a range narrow enough to make a decision. Naïve OLS gives £3.21k ± noise that is too optimistic to trust.
+:::
+
+---
+
+## 9 · Heterogeneity Preview — Teaser for Week 15
+
+We have been estimating the *average* effect — £1.82k across all 600 customers. But the DGP has heterogeneity baked in: the effect varies by customer tenure.
+
+```{python}
+#| label: heterogeneity-preview
+#| fig-height: 4
+#| fig-width: 9
+
+# Split customers into tenure quintiles
+tenure_quintile = pd.qcut(customer_tenure, q=5,
+                           labels=["Q1\n(0–2yr)", "Q2\n(2–4yr)", "Q3\n(4–6yr)",
+                                   "Q4\n(6–8yr)", "Q5\n(8–10yr)"])
+
+# True effect by quintile
+true_by_quintile = pd.Series(tau_i).groupby(tenure_quintile).mean()
+
+# Naive quintile-level OLS (illustrative — not causal)
+naive_by_quintile = []
+for q in true_by_quintile.index:
+    mask = tenure_quintile == q
+    m = sm.OLS(Y[mask], sm.add_constant(pd.Series(T[mask], name="T"))).fit()
+    naive_by_quintile.append(m.params["T"])
+
+fig, ax = plt.subplots(figsize=(9, 4))
+x = np.arange(5)
+w = 0.35
+ax.bar(x - w/2, true_by_quintile, w, color="#16a34a", alpha=0.85,
+       label="True CATE by tenure quintile")
+ax.bar(x + w/2, naive_by_quintile, w, color="#dc2626", alpha=0.85,
+       label="Naïve OLS by quintile (confounded)")
+ax.axhline(tau_true, color="#64748b", linestyle="--", lw=1.5,
+           label=f"ATE = £{tau_true:.2f}k")
+ax.set_xticks(x)
+ax.set_xticklabels(true_by_quintile.index)
+ax.set_xlabel("Customer tenure quintile")
+ax.set_ylabel("Effect of £1k ad spend on sales (£000s)")
+ax.set_title("The ATE hides real variation — new customers respond more",
+             fontsize=13)
+ax.legend(fontsize=10)
+plt.tight_layout()
+plt.show()
+
+print("True CATE by quintile:")
+for q, v in true_by_quintile.items():
+    print(f"  {q}: £{v:.2f}k")
+```
+
+::: {.callout-note}
+**What this chart shows — and what we cannot do yet.** The green bars are the true effect by customer tenure quintile. New customers (Q1, tenure 0–2 years) respond almost twice as strongly to advertising as long-tenured customers (Q5, 8–10 years) who are already familiar with the brand and likely to buy regardless.
+
+The ATE of £1.82k is the average of these bars — correct on average, but obscuring real variation that matters for targeting decisions. Should you spend more advertising at new customers or loyal ones? The ATE cannot answer that.
+
+This is the CATE problem — **Conditional Average Treatment Effect**. The effect as a function of customer characteristics, not a single number. Week 15 shows how to estimate it.
+
+The red bars show naïve quintile-level OLS — confounded, as expected. Even stratified, the naïve approach overestimates the effect in every quintile.
+:::
+
+---
+
+## 10 · Bonus — `econml` LinearDML
+
+The manual implementation shows exactly what DML does. In practice, `econml` wraps the same logic with automatic inference, bootstrap confidence intervals, and support for richer model classes.
+
+```{python}
+#| label: econml-dml
+#| eval: false
+from econml.dml import LinearDML
+from sklearn.ensemble import RandomForestRegressor
+
+model_y = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
+model_t = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
+
+dml = LinearDML(
+    model_y       = model_y,
+    model_t       = model_t,
+    discrete_treatment = False,
+    cv            = 5,
+    random_state  = 42
+)
+dml.fit(Y, T, X=X)
+
+ate       = dml.ate(X)
+ate_lo, ate_hi = dml.ate_interval(X, alpha=0.05)
+
+print(f"econml LinearDML ATE:  £{ate:.3f}k")
+print(f"95% CI:                [£{ate_lo:.3f}k, £{ate_hi:.3f}k]")
+print(f"Manual DML estimate:   £{tau_dml:.3f}k  (for comparison)")
+```
+
+::: {.callout-note}
+**Why bother with `econml` if we can do it manually?** The manual implementation is pedagogically essential — it shows exactly what the library is doing. But `econml` adds:
+
+- **Bootstrap confidence intervals** that are more reliable than the asymptotic SE for smaller samples
+- **Richer final stages** — `CausalForestDML` for non-parametric CATE, `DRLearner` for doubly-robust estimation
+- **Built-in model selection** via cross-validation scores for the nuisance models
+- **Week 15 payoff**: `CausalForestDML` will give us CATE estimates with valid per-observation confidence intervals
+
+The ATE estimate from `econml` should match the manual DML closely — both are doing the same five-fold cross-fitting with the same learner. The point of showing both is to demystify the library: it is not a black box, it is the loop we already wrote, wrapped with better inference tools.
+
+To install: `uv add econml` in the repo root.
+:::
+
+---
+
+## Summary
+
+```{python}
+#| label: summary-table
+print("=" * 60)
+print(f"  True ATE:              £{tau_true:.3f}k")
+print("=" * 60)
+print(f"  Naïve OLS:             £{tau_naive:.3f}k  (bias: {tau_naive-tau_true:+.3f}k)")
+print(f"  OLS + linear controls: £{tau_ctrl:.3f}k  (bias: {tau_ctrl-tau_true:+.3f}k)")
+print(f"  DML (manual, RF):      £{tau_dml:.3f}k  (bias: {tau_dml-tau_true:+.3f}k)")
+print(f"  95% CI:                [£{ci_lo:.3f}k, £{ci_hi:.3f}k]")
+print("=" * 60)
+print()
+print("  DML recovers the truth. OLS cannot handle")
+print("  the non-linear confounding of brand awareness.")
+```
+
+**Three things to carry into Week 15:**
+
+1. **ATE is an average.** It is correct on average but hides real heterogeneity — new customers respond twice as strongly as loyal ones in this dataset.
+
+2. **DML is FWL with ML partialling.** The algebra is unchanged from Week 11. What changed is the tool used in Steps 1 & 2.
+
+3. **Cross-fitting is non-negotiable.** Without it, the residuals are contaminated and inference is invalid. With it, we get honest standard errors and confidence intervals we can act on.
+
+*Next time: the same DGP, same logic — but instead of estimating one number, we estimate a function. τ(x) rather than τ.*
