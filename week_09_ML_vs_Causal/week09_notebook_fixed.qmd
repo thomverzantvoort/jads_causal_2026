@@ -90,32 +90,33 @@ rng = np.random.default_rng(42)
 
 ```{python}
 #| label: simpson-data
-# --- Budget segment ---
-# Small group, low baseline conversion, Campaign A assigned
-n_budget = 200
-budget = pd.DataFrame({
-    "segment":    "Budget",
-    "campaign":   "A",
-    "conversion": rng.binomial(1, 0.18, n_budget)   # 18% base rate
-})
+# Conversion rates by segment and campaign:
+#   Campaign A is 8pp better than B in *both* segments (the truth)
+#   But B is disproportionately assigned to the high-converting Premium segment
+#   — that imbalance is what creates the paradox at the aggregate level
 
-# --- Premium segment ---
-# Large group, high baseline conversion, Campaign B assigned
-n_premium = 800
-premium = pd.DataFrame({
-    "segment":    "Premium",
-    "campaign":   "B",
-    "conversion": rng.binomial(1, 0.62, n_premium)  # 62% base rate
-})
+#              Campaign A   Campaign B
+# Budget:         26%          18%      (A wins by 8pp)
+# Premium:        70%          62%      (A wins by 8pp)
 
-# Add campaign lift: A is genuinely 8pp better in both segments
-budget.loc[budget.campaign == "A",    "conversion"] = (
-    rng.binomial(1, 0.26, n_budget))   # 18 + 8
-premium.loc[premium.campaign == "B",  "conversion"] = (
-    rng.binomial(1, 0.62, n_premium))  # no lift — B is the control here
+# Assignment: mostly A in Budget, mostly B in Premium
+n_budget_A  = 160;  n_budget_B  = 40    # 80% A in Budget
+n_premium_A = 100;  n_premium_B = 700   # ~12% A in Premium
 
-# Combine
-df = pd.concat([budget, premium], ignore_index=True)
+rows = []
+for seg, camp, n, rate in [
+    ("Budget",  "A", n_budget_A,  0.26),
+    ("Budget",  "B", n_budget_B,  0.18),
+    ("Premium", "A", n_premium_A, 0.70),
+    ("Premium", "B", n_premium_B, 0.62),
+]:
+    rows.append(pd.DataFrame({
+        "segment":    seg,
+        "campaign":   camp,
+        "conversion": rng.binomial(1, rate, n),
+    }))
+
+df = pd.concat(rows, ignore_index=True)
 ```
 
 ```{python}
